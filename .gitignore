@@ -20,6 +20,10 @@ env/
 *.swo
 *~
 
+# Claude
+CLAUDE.md
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -27,9 +31,15 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
+# Generated plots
+**/plots/*.png
+
 # Data / model artifacts
 *.pt
 *.bin
 *.safetensors
 *.ckpt
 wandb/
+
+# Bergson gradient indexes
+**/runs/
