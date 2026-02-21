@@ -158,6 +158,19 @@ def main():
             deltas.append(val_delta / step_delta if step_delta > 0 else 0)
         all_stats[f"{stat_name}_rate"] = deltas
 
+    header = f"{'Interval':>16s}"
+    for s in STAT_NAMES:
+        header += f"  {s:>20s}"
+    print(header)
+    print("-" * len(header))
+
+    for i in range(len(checkpoints) - 1):
+        interval = f"{checkpoints[i]}-{checkpoints[i+1]}"
+        row = f"  {interval:>14s}"
+        for s in STAT_NAMES:
+            row += f"  {all_stats[f'{s}_rate'][i]:>20.6f}"
+        print(row)
+
     # Plot
     output_dir = Path(__file__).parent / "plots"
     output_dir.mkdir(exist_ok=True)

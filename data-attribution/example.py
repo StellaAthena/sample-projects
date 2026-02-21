@@ -19,9 +19,7 @@ Without Bergson (embedding baseline only):
     pip install transformers torch datasets
     python example.py
 """
-import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import torch
@@ -84,11 +82,17 @@ def verify_behaviors(model, tokenizer, device="cpu"):
     return confirmed
 
 
-def build_and_query_bergson(prompts, index_dir, device="cpu"):
+def build_and_query_bergson(prompts, index_dir, pile_ds, device="cpu"):
     """Build a small Bergson gradient index and query it.
 
     Uses pythia-14m and pile-10k for speed. The index is built into
     index_dir and queried for each prompt.
+
+    Args:
+        prompts: List of prompt strings to attribute.
+        index_dir: Path to store/load the gradient index.
+        pile_ds: Pre-loaded pile-10k dataset (avoids redundant downloads).
+        device: Device to run on ("cpu" or "cuda").
 
     Returns a dict mapping prompt -> list of (score, text_preview) tuples,
     or None if Bergson is not available.
@@ -104,7 +108,7 @@ def build_and_query_bergson(prompts, index_dir, device="cpu"):
     index_path = str(index_dir)
     print(f"\nBuilding Bergson gradient index at {index_path}...")
     print(f"  Model: {INDEX_MODEL}")
-    print(f"  Dataset: {INDEX_DATASET} (train[:500] for speed)")
+    print(f"  Dataset: {INDEX_DATASET}")
 
     build_cmd = [
         "bergson", "build", index_path,
@@ -138,10 +142,6 @@ def build_and_query_bergson(prompts, index_dir, device="cpu"):
 
     attr = Attributor(index_path, device=device, unit_norm=True)
 
-    # Load the dataset to retrieve text for top results
-    from datasets import load_dataset
-    ds = load_dataset(INDEX_DATASET, split="train")
-
     results = {}
     for prompt in prompts:
         query_tokens = tokenizer(prompt, return_tensors="pt").to(device)["input_ids"]
@@ -152,8 +152,8 @@ def build_and_query_bergson(prompts, index_dir, device="cpu"):
 
         top_examples = []
         for idx, score in zip(trace_result.indices.tolist(), trace_result.scores.tolist()):
-            if 0 <= idx < len(ds):
-                text_preview = ds[idx]["text"][:200].replace("\n", " ")
+            if 0 <= idx < len(pile_ds):
+                text_preview = pile_ds[idx]["text"][:200].replace("\n", " ")
             else:
                 text_preview = f"(index {idx} out of range)"
             top_examples.append((score, text_preview))
@@ -219,9 +219,15 @@ def main():
     prompts = [b["prompt"] for b in confirmed[:2]]
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Load pile-10k once (used by both Bergson and embedding baseline)
+    from datasets import load_dataset
+
+    print("\nLoading pile-10k dataset...")
+    pile_ds = load_dataset("NeelNanda/pile-10k", split="train")
+
     # Use a persistent index directory (reuse across runs)
     index_dir = Path(__file__).parent / "runs" / "pythia-14m-pile10k"
-    bergson_results = build_and_query_bergson(prompts, index_dir, device=device)
+    bergson_results = build_and_query_bergson(prompts, index_dir, pile_ds, device=device)
 
     if bergson_results:
         for prompt, examples in bergson_results.items():
@@ -234,11 +240,7 @@ def main():
     print("Embedding similarity baseline (no gradients)")
     print("=" * 65)
 
-    from datasets import load_dataset
-
-    print("Loading pile-10k for baseline comparison...")
-    ds = load_dataset("NeelNanda/pile-10k", split="train")
-    sample_texts = [ex["text"][:500] for ex in ds.select(range(200))]
+    sample_texts = [ex["text"][:500] for ex in pile_ds.select(range(200))]
 
     for b in confirmed[:2]:
         query = b["prompt"]

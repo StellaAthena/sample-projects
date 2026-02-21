@@ -38,20 +38,28 @@ MODEL_SPLITS = [
 ]
 
 
-def load_memorized_indices(split):
-    """Load the set of training data indices memorized by a given model.
+def load_all_memorized_indices(splits):
+    """Load memorized indices for all splits at once.
+
+    Loads the dataset once and extracts indices for each split, avoiding
+    redundant HuggingFace dataset loading calls.
 
     Args:
-        split: Dataset split name, e.g. "duped.160m"
+        splits: List of dataset split names, e.g. ["duped.70m", "duped.160m"]
 
     Returns:
-        Set of integer indices into the training data that are memorized.
+        Dict mapping split name to set of memorized indices.
     """
-    ds = load_dataset(MEMORIZATION_DATASET, split=split)
-    return set(ds["index"])
+    print(f"Loading memorization data for {len(splits)} splits...")
+    result = {}
+    for split in splits:
+        ds = load_dataset(MEMORIZATION_DATASET, split=split)
+        result[split] = set(ds["index"])
+        print(f"  {split}: {len(result[split]):,} memorized sequences")
+    return result
 
 
-def evaluate_predictor(predictor, target_split, num_sequences):
+def evaluate_predictor(predictor, target_split, num_sequences, memorized_indices):
     """Evaluate a memorization predictor against ground truth.
 
     Args:
@@ -60,12 +68,14 @@ def evaluate_predictor(predictor, target_split, num_sequences):
         target_split: The dataset split to evaluate against, e.g. "duped.1.4b".
         num_sequences: Total number of training sequences to evaluate over.
             The predictor is called on indices 0 through num_sequences - 1.
+        memorized_indices: Dict mapping split names to sets of memorized indices
+            (from load_all_memorized_indices).
 
     Returns:
         Dict with accuracy, f1, precision, and recall.
     """
-    memorized = load_memorized_indices(target_split)
-    print(f"Loaded {len(memorized)} memorized sequences for {target_split}")
+    memorized = memorized_indices[target_split]
+    print(f"Evaluating against {len(memorized):,} memorized sequences for {target_split}")
 
     y_true = []
     y_pred = []
@@ -85,7 +95,7 @@ def evaluate_predictor(predictor, target_split, num_sequences):
     }
 
 
-def make_160m_baseline_predictor(num_sequences):
+def make_160m_baseline_predictor(memorized_indices):
     """Create a predictor that assumes every model memorizes exactly what
     Pythia-160M memorizes.
 
@@ -94,14 +104,14 @@ def make_160m_baseline_predictor(num_sequences):
     target model size.
 
     Args:
-        num_sequences: Total number of training sequences (used only for
-            reporting, not for the predictor logic).
+        memorized_indices: Dict mapping split names to sets of memorized indices
+            (from load_all_memorized_indices).
 
     Returns:
         A callable predictor: int -> bool
     """
-    memorized_by_160m = load_memorized_indices("duped.160m")
-    print(f"Baseline: {len(memorized_by_160m)} sequences memorized by 160M")
+    memorized_by_160m = memorized_indices["duped.160m"]
+    print(f"Baseline: {len(memorized_by_160m):,} sequences memorized by 160M")
 
     def predictor(idx):
         return idx in memorized_by_160m
@@ -213,13 +223,16 @@ def main():
     # thorough evaluation (at the cost of runtime).
     num_sequences = 2_000_000
 
-    predictor = make_160m_baseline_predictor(num_sequences)
+    # Load all memorization data upfront (avoids redundant dataset loads)
+    memorized_indices = load_all_memorized_indices(MODEL_SPLITS)
+
+    predictor = make_160m_baseline_predictor(memorized_indices)
 
     # Evaluate against each model size
     all_results = []
     for split in MODEL_SPLITS:
         print(f"\nEvaluating 160M-baseline predictor against {split}...")
-        results = evaluate_predictor(predictor, split, num_sequences)
+        results = evaluate_predictor(predictor, split, num_sequences, memorized_indices)
         all_results.append((split, results))
 
     # Print summary table
