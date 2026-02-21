@@ -1,12 +1,15 @@
 """
 Example evaluation script for predicting memorization in Pythia models.
 
-Loads memorization data from HuggingFace, evaluates a predictor function
-against ground truth, and reports accuracy, F1, precision, and recall.
-Produces a summary table and bar charts comparing metrics across model sizes.
+The goal is to predict which training sequences Pythia-12B will memorize,
+using only cheaper models (70M through 6.9B). This script evaluates a
+simple baseline: for each smaller model, predict that 12B memorizes a
+sequence if and only if the smaller model also memorized it.
 
-Includes a baseline predictor that predicts every model memorizes exactly
-the same sequences as Pythia-160M.
+Loads memorization data from HuggingFace, evaluates each predictor against
+the 12B ground truth, and reports accuracy, F1, precision, and recall.
+Plots show how prediction quality scales with the predictor's pretraining
+compute budget (approximated as 6PD).
 
 Usage:
     pip install datasets scikit-learn matplotlib
@@ -17,11 +20,10 @@ from pathlib import Path
 from datasets import load_dataset
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mtick
 
 
 # The memorization dataset contains one split per model size.
-# Each row is a sequence that WAS memorized by that model — the index field
+# Each row is a sequence that WAS memorized by that model. The index field
 # identifies which training sequence it corresponds to.
 MEMORIZATION_DATASET = "EleutherAI/pythia-memorized-evals"
 
@@ -36,6 +38,21 @@ MODEL_SPLITS = [
     "duped.6.9b",
     "duped.12b",
 ]
+
+# Approximate parameter counts for each Pythia model.
+# All models were trained on ~300B tokens. Approximate pretraining compute
+# as C = 6 * P * D where P = parameters and D = tokens processed.
+PYTHIA_PARAMS = {
+    "70m": 70e6,
+    "160m": 160e6,
+    "410m": 410e6,
+    "1b": 1e9,
+    "1.4b": 1.4e9,
+    "2.8b": 2.8e9,
+    "6.9b": 6.9e9,
+    "12b": 12e9,
+}
+PYTHIA_TOKENS = 300e9
 
 
 def load_all_memorized_indices(splits):
@@ -75,7 +92,9 @@ def evaluate_predictor(predictor, target_split, num_sequences, memorized_indices
         Dict with accuracy, f1, precision, and recall.
     """
     memorized = memorized_indices[target_split]
-    print(f"Evaluating against {len(memorized):,} memorized sequences for {target_split}")
+    n_in_range = sum(1 for idx in memorized if idx < num_sequences)
+    print(f"Evaluating against {n_in_range:,} memorized sequences in range "
+          f"(of {len(memorized):,} total) for {target_split}")
 
     y_true = []
     y_pred = []
@@ -95,26 +114,25 @@ def evaluate_predictor(predictor, target_split, num_sequences, memorized_indices
     }
 
 
-def make_160m_baseline_predictor(memorized_indices):
-    """Create a predictor that assumes every model memorizes exactly what
-    Pythia-160M memorizes.
+def make_smaller_model_predictor(predictor_split, memorized_indices):
+    """Create a predictor that uses a smaller model's memorization set to
+    predict what the target model memorizes.
 
-    This is a simple baseline: it looks up whether each index appears in
-    the 160M memorization set and predicts accordingly, regardless of the
-    target model size.
+    This is a simple baseline: it predicts that the target model memorizes
+    a sequence if and only if the predictor model also memorized it.
 
     Args:
+        predictor_split: The split to use as the predictor, e.g. "duped.160m".
         memorized_indices: Dict mapping split names to sets of memorized indices
             (from load_all_memorized_indices).
 
     Returns:
         A callable predictor: int -> bool
     """
-    memorized_by_160m = memorized_indices["duped.160m"]
-    print(f"Baseline: {len(memorized_by_160m):,} sequences memorized by 160M")
+    predictor_set = memorized_indices[predictor_split]
 
     def predictor(idx):
-        return idx in memorized_by_160m
+        return idx in predictor_set
 
     return predictor
 
@@ -125,16 +143,16 @@ def split_to_label(split):
 
 
 def print_results_table(all_results):
-    """Print a formatted table of evaluation results across model sizes.
+    """Print a formatted table of evaluation results.
 
     Args:
-        all_results: List of (split_name, results_dict) tuples.
+        all_results: List of (predictor_label, results_dict) tuples.
     """
-    header = f"{'Model':<10} {'Accuracy':>10} {'F1':>10} {'Precision':>10} {'Recall':>10} {'Memorized':>12} {'Predicted':>12} {'True Pos':>12}"
+    header = (f"{'Predictor':<10} {'Accuracy':>10} {'F1':>10} {'Precision':>10} "
+              f"{'Recall':>10} {'Memorized':>12} {'Predicted':>12} {'True Pos':>12}")
     print(header)
     print("-" * len(header))
-    for split, r in all_results:
-        label = split_to_label(split)
+    for label, r in all_results:
         print(
             f"{label:<10} {r['accuracy']:>10.4f} {r['f1']:>10.4f} "
             f"{r['precision']:>10.4f} {r['recall']:>10.4f} "
@@ -144,100 +162,94 @@ def print_results_table(all_results):
 
 
 def plot_metrics(all_results, output_dir="."):
-    """Plot evaluation metrics across model sizes.
+    """Plot evaluation metrics vs predictor compute budget.
 
-    Produces two figures:
-    - Bar chart of F1, precision, and recall per model size
-    - Memorization rate and overlap counts per model size
+    Each entry in all_results uses a different model's memorization set
+    to predict 12B memorization. The x-axis is the compute used to train
+    that predictor model (6PD approximation).
 
     Args:
-        all_results: List of (split_name, results_dict) tuples.
+        all_results: List of (predictor_label, results_dict) tuples,
+            where predictor_label is a model size like "70m".
         output_dir: Directory to save plots to.
     """
     output_dir = Path(output_dir)
-    labels = [split_to_label(s) for s, _ in all_results]
+    labels = [label for label, _ in all_results]
     f1s = [r["f1"] for _, r in all_results]
     precisions = [r["precision"] for _, r in all_results]
     recalls = [r["recall"] for _, r in all_results]
-    memorized = [r["num_memorized"] for _, r in all_results]
-    true_pos = [r["num_true_positives"] for _, r in all_results]
-    num_seq = all_results[0][1]["num_sequences"]
+    accuracies = [r["accuracy"] for _, r in all_results]
 
-    # --- Figure 1: F1 / Precision / Recall ---
+    compute_flops = [6 * PYTHIA_PARAMS[label] * PYTHIA_TOKENS for label in labels]
+
+    # --- Figure 1: All metrics vs predictor compute ---
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(compute_flops, f1s, "o-", label="F1", color="#4CAF50")
+    ax.plot(compute_flops, precisions, "s-", label="Precision", color="#2196F3")
+    ax.plot(compute_flops, recalls, "^-", label="Recall", color="#FF9800")
+    ax.plot(compute_flops, accuracies, "D-", label="Accuracy", color="#9C27B0")
+    ax.set_xscale("log")
+    ax.set_xlabel("Predictor pretraining compute (FLOP, 6PD approximation)")
+    ax.set_ylabel("Score")
+    ax.set_ylim(0, 1.05)
+    ax.set_title("Predicting Pythia-12B Memorization from Smaller Models")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_dir / "metrics_vs_compute.png", dpi=150)
+    print(f"Saved {output_dir / 'metrics_vs_compute.png'}")
+    plt.close(fig)
+
+    # --- Figure 2: Bar chart of metrics by predictor model ---
     fig, ax = plt.subplots(figsize=(10, 5))
     x = range(len(labels))
-    width = 0.25
-    ax.bar([i - width for i in x], precisions, width, label="Precision", color="#2196F3")
-    ax.bar(x, recalls, width, label="Recall", color="#FF9800")
-    ax.bar([i + width for i in x], f1s, width, label="F1", color="#4CAF50")
+    width = 0.2
+    ax.bar([i - 1.5 * width for i in x], precisions, width, label="Precision", color="#2196F3")
+    ax.bar([i - 0.5 * width for i in x], recalls, width, label="Recall", color="#FF9800")
+    ax.bar([i + 0.5 * width for i in x], f1s, width, label="F1", color="#4CAF50")
+    ax.bar([i + 1.5 * width for i in x], accuracies, width, label="Accuracy", color="#9C27B0")
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
-    ax.set_xlabel("Target model size")
+    ax.set_xlabel("Predictor model")
     ax.set_ylabel("Score")
-    ax.set_title("160M-Baseline Predictor: Precision, Recall, and F1 by Target Model")
+    ax.set_title("Predicting Pythia-12B Memorization: Metrics by Predictor Model")
     ax.set_ylim(0, 1.05)
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(output_dir / "metrics_by_model.png", dpi=150)
-    print(f"Saved {output_dir / 'metrics_by_model.png'}")
-    plt.close(fig)
-
-    # --- Figure 2: Memorization counts ---
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar([i - width / 2 for i in x], memorized, width, label="Actually memorized", color="#E53935")
-    ax.bar([i + width / 2 for i in x], true_pos, width, label="Correctly predicted (true positives)", color="#43A047")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.set_xlabel("Target model size")
-    ax.set_ylabel("Number of sequences")
-    ax.set_title(f"Memorization Counts (out of {num_seq:,} sequences evaluated)")
-    ax.legend()
-    ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_dir / "memorization_counts.png", dpi=150)
-    print(f"Saved {output_dir / 'memorization_counts.png'}")
-    plt.close(fig)
-
-    # --- Figure 3: Memorization rate by model size ---
-    fig, ax = plt.subplots(figsize=(10, 5))
-    rates = [m / num_seq for m in memorized]
-    ax.bar(x, rates, color="#7B1FA2")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.set_xlabel("Model size")
-    ax.set_ylabel("Memorization rate")
-    ax.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
-    ax.set_title(f"Fraction of Sequences Memorized by Model Size (n={num_seq:,})")
-    ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_dir / "memorization_rate.png", dpi=150)
-    print(f"Saved {output_dir / 'memorization_rate.png'}")
+    fig.savefig(output_dir / "metrics_by_predictor.png", dpi=150)
+    print(f"Saved {output_dir / 'metrics_by_predictor.png'}")
     plt.close(fig)
 
 
 def main():
     # Total number of sequences in the Pile training data.
-    # The full Pile has ~210M sequences of 2049 tokens each.
+    # The full Pile has ~146M sequences of 2049 tokens each.
     # For a quick demo, evaluate on a subset. Increase this for a more
     # thorough evaluation (at the cost of runtime).
     num_sequences = 2_000_000
 
+    # The target: predict what Pythia-12B memorizes
+    target_split = "duped.12b"
+
+    # Predictor models: every model smaller than the target
+    predictor_splits = [s for s in MODEL_SPLITS if s != target_split]
+
     # Load all memorization data upfront (avoids redundant dataset loads)
     memorized_indices = load_all_memorized_indices(MODEL_SPLITS)
 
-    predictor = make_160m_baseline_predictor(memorized_indices)
-
-    # Evaluate against each model size
+    # Evaluate each smaller model as a predictor of 12B memorization
     all_results = []
-    for split in MODEL_SPLITS:
-        print(f"\nEvaluating 160M-baseline predictor against {split}...")
-        results = evaluate_predictor(predictor, split, num_sequences, memorized_indices)
-        all_results.append((split, results))
+    for pred_split in predictor_splits:
+        label = split_to_label(pred_split)
+        print(f"\nUsing {label} memorization to predict {split_to_label(target_split)}...")
+        predictor = make_smaller_model_predictor(pred_split, memorized_indices)
+        results = evaluate_predictor(predictor, target_split, num_sequences, memorized_indices)
+        all_results.append((label, results))
 
     # Print summary table
     print(f"\n{'=' * 100}")
-    print("Summary: 160M-Baseline Predictor Results")
+    print(f"Predicting {split_to_label(target_split)} Memorization from Smaller Models")
     print("=" * 100)
     print_results_table(all_results)
 
